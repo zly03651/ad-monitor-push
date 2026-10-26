@@ -2,7 +2,8 @@ name: ad-monitor 企微推送
 
 on:
   schedule:
-    # 每 30 分钟触发一次；脚本内部再判断北京时间是否在工作时段
+    # 每 30 分钟触发一次；默认全天（周一~周日 00:00-24:00），
+    # 时段判断在脚本内（PUSH_DAYS / PUSH_START / PUSH_END 三个仓库变量可调）
     - cron: '*/30 * * * *'
   workflow_dispatch:
 
@@ -32,4 +33,8 @@ jobs:
         env:
           APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          # 可选：仓库 Variables 里配了就生效，不配＝周一~周日全天
+          PUSH_DAYS: ${{ vars.PUSH_DAYS }}
+          PUSH_START: ${{ vars.PUSH_START }}
+          PUSH_END: ${{ vars.PUSH_END }}
         run: node push.js
