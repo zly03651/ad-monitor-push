@@ -10,7 +10,7 @@
  *   在投(status=active) + AP>60 + 付费用户>0 + 有负责人
  *
  * 【打扰控制】
- *   ① 只在工作时段跑（周一~周四 09:00-20:30 / 周五 09:00-18:30，北京时间）
+ *   ① 推送时段（默认：周一~周日 00:00-24:00，全天；可用 PUSH_DAYS/PUSH_START/PUSH_END 收窄）
  *   ② 内容没变就不推（.state/last.json 记上次指纹）
  * 需要环境变量：APP_PASSWORD（过访问口令闸）、WECOM_WEBHOOK（群机器人）
  * ===================================================================== */
@@ -30,14 +30,44 @@ const HOOK = (process.env.WECOM_WEBHOOK || '').trim();
 
 function log(msg) { console.log('[' + new Date().toISOString() + '] ' + msg); }
 
-/* 北京时间的工作时段：周一~周四 09:00-20:30，周五 09:00-18:30，周末不跑 */
-function inWorkWindow(now) {
-  const bj = new Date(now.getTime() + 8 * 3600e3);      // UTC → 北京
-  const dow = bj.getUTCDay();                            // 0=周日
-  if (dow === 0 || dow === 6) return false;
+/* ---- 推送时段：默认周一~周日 全天 ----
+ * PUSH_DAYS="1-7"（1=周一 … 7=周日，可写 "1-5" 或 "1,3,5"）
+ * PUSH_START / PUSH_END 为北京时间 HH[:MM]，END=24 表示当日 24:00（即含 23:59）
+ * 例：想回到工作时段 → PUSH_DAYS=1-5 PUSH_START=9 PUSH_END=20:30 */
+function hmToMin(s, dflt) {
+  const t = String(s == null ? '' : s).trim();
+  if (!t) return dflt;
+  if (t === '24') return 24 * 60;
+  const m = /^(\d{1,2})(?::(\d{1,2}))?$/.exec(t);
+  if (!m) return dflt;
+  return Number(m[1]) * 60 + Number(m[2] || 0);
+}
+function daySet(spec) {
+  const set = new Set();
+  String(spec || '1-7').split(',').forEach(seg => {
+    const p = seg.trim().split('-');
+    const a = Number(p[0]);
+    const b = p.length > 1 ? Number(p[1]) : a;
+    if (!isFinite(a) || !isFinite(b)) return;
+    for (let d = a; d <= b; d++) if (d >= 1 && d <= 7) set.add(d);
+  });
+  return set.size ? set : new Set([1, 2, 3, 4, 5, 6, 7]);
+}
+const PUSH_DAYS = daySet(process.env.PUSH_DAYS || '1-7');
+const PUSH_START = hmToMin(process.env.PUSH_START, 0);
+const PUSH_END = hmToMin(process.env.PUSH_END, 24 * 60);
+
+function inPushWindow(now) {
+  const bj = new Date(now.getTime() + 8 * 3600e3);        // UTC → 北京
+  const dow = bj.getUTCDay() === 0 ? 7 : bj.getUTCDay();  // 1=周一 … 7=周日
+  if (!PUSH_DAYS.has(dow)) return false;
   const min = bj.getUTCHours() * 60 + bj.getUTCMinutes();
-  const end = dow === 5 ? 18 * 60 + 30 : 20 * 60 + 30;
-  return min >= 9 * 60 && min <= end;
+  return min >= PUSH_START && min < PUSH_END;
+}
+function windowText() {
+  const days = [...PUSH_DAYS].sort().join(',');
+  const fmt = m => (m >= 24 * 60 ? '24:00' : String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'));
+  return '星期' + days + ' ' + fmt(PUSH_START) + '-' + fmt(PUSH_END);
 }
 
 async function login() {
@@ -117,7 +147,8 @@ function writeState(s) {
   if (!PW) { console.error('缺少 APP_PASSWORD'); process.exit(2); }
   if (!HOOK && !DRY) { console.error('缺少 WECOM_WEBHOOK'); process.exit(2); }
 
-  if (!inWorkWindow(new Date())) { log('不在工作时段，跳过'); return; }
+  log('推送时段：' + windowText());
+  if (!inPushWindow(new Date())) { log('不在推送时段（' + windowText() + '），跳过'); return; }
 
   const cookie = await login();
   log('已过口令闸');
