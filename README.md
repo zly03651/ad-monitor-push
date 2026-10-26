@@ -38,3 +38,11 @@ APP_PASSWORD=xxx WECOM_WEBHOOK=xxx DRY_RUN=1 node push.js
 - 仓库里**不含任何业务数据与凭据**，凭据只存在仓库的加密 Secrets 里；
 - 推送判据改口径时，优先改主系统（`server/lib/metrics.js`），本仓库只跟着取数；
 - 手动触发：Actions 页面 → 选 `ad-monitor 企微推送` → Run workflow。
+
+## 注意事项
+
+- **仓库连续 60 天没有任何活动时，GitHub 会自动暂停定时任务**（平台策略，不是本仓库的 bug）。
+  发现不推了：进 Actions 页面点一次 `Run workflow` 即恢复，或随便提交一次改动。
+- 免费额度：本任务每次约 20 秒、每天 48 次 ≈ 每月 480 分钟，远低于 2000 分钟免费额度。
+- 换口令后：Settings → Secrets and variables → Actions → 更新 `APP_PASSWORD` 即可，代码不用动。
+- 若要停掉推送：Actions 页面点 `...` → Disable workflow（或直接停用仓库的 Actions）。
