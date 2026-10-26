@@ -1,0 +1,35 @@
+name: ad-monitor 企微推送
+
+on:
+  schedule:
+    # 每 30 分钟触发一次；脚本内部再判断北京时间是否在工作时段
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ad-monitor-push
+  cancel-in-progress: false
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 恢复去重状态（内容没变就不重复推）
+        uses: actions/cache@v4
+        with:
+          path: .state
+          key: state-${{ github.run_id }}
+          restore-keys: |
+            state-
+
+      - name: 运行推送
+        env:
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+        run: node push.js
