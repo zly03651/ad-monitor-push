@@ -19,7 +19,10 @@
 const fs = require('fs');
 const path = require('path');
 
-const BASE = process.env.BASE_URL || 'https://ad-monitor-dashboard-20394.app.workbuddy.host';
+/* 【2026-10-26 重新首发】新站 + 平台分享码校验（不带 sharecode 的请求被平台 403 拦下） */
+const BASE = (process.env.BASE_URL || 'https://ad-monitor-dashboard-87745.app.workbuddy.host').replace(/\/$/, '');
+const SHARECODE = process.env.SHARECODE || 'Q26D2NW5HK';
+const withShare = (u) => u + (u.includes('?') ? '&' : '?') + 'sharecode=' + encodeURIComponent(SHARECODE);
 const AP_MIN = Number(process.env.AP_MIN || 60);
 const DRY = process.env.DRY_RUN === '1';
 const STATE_DIR = path.join(process.cwd(), '.state');
@@ -71,7 +74,7 @@ function windowText() {
 }
 
 async function login() {
-  const r = await fetch(BASE + '/__login', {
+  const r = await fetch(withShare(BASE + '/__login'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'pw=' + encodeURIComponent(PW),
@@ -83,7 +86,7 @@ async function login() {
 }
 
 async function snapshot(cookie) {
-  const r = await fetch(BASE + '/api/snapshot', { headers: { Cookie: cookie } });
+  const r = await fetch(withShare(BASE + '/api/snapshot'), { headers: { Cookie: cookie } });
   if (r.status !== 200) throw new Error('/api/snapshot 返回 ' + r.status);
   const j = await r.json();
   return (j && j.data) ? j.data : j;      /* 该端点裸返回，两种都兼容 */
