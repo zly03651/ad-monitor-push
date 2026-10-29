@@ -12,6 +12,8 @@
  * 【打扰控制】
  *   ① 推送时段（默认：周一~周日 00:00-24:00，全天；可用 PUSH_DAYS/PUSH_START/PUSH_END 收窄）
  *   ② 内容没变就不推（.state/last.json 记上次指纹）
+ *   ③ 方案 A（2026-10-29）：推送前查沙箱 /api/notify/pushed，今天沙箱已推过的计划不重推
+ *      （查询失败按"没推过"处理，可用性优先）
  * 需要环境变量：APP_PASSWORD（过访问口令闸）、WECOM_WEBHOOK（群机器人）
  * ===================================================================== */
 'use strict';
@@ -81,15 +83,45 @@ async function login() {
     redirect: 'manual',
   });
   const sc = r.headers.getSetCookie ? r.headers.getSetCookie() : [];
-  if (!sc.length) throw new Error('口令闸登录失败（status ' + r.status + '），检查 APP_PASSWORD');
+  /* 【2026-10-29 硬化】只认闸自己的 Cookie（adm_access）—— 2026-10-29 实测线上
+   * 「口令不对」页也回 200 + 平台层 Set-Cookie，只判"有 Cookie"会把口令错当成
+   * 登录成功，然后 snapshot 拿回口令页 HTML 在 JSON.parse 处才炸（报错误导人）。
+   * 另：404 = 实例没启用口令闸（本机开发形态）⇒ 直接走，方便对本地实例联调。 */
+  if (r.status === 404) { log('实例未启用口令闸（本机开发形态），跳过登录'); return ''; }
+  if (!sc.some(x => /(?:^|;)\s*adm_access=/.test(String(x)))) {
+    throw new Error('口令闸登录失败（status ' + r.status + '）：口令不对，检查 APP_PASSWORD');
+  }
   return sc.map(x => String(x).split(';')[0]).join('; ');
 }
 
 async function snapshot(cookie) {
-  const r = await fetch(withShare(BASE + '/api/snapshot'), { headers: { Cookie: cookie } });
+  const r = await fetch(withShare(BASE + '/api/snapshot'), { headers: cookie ? { Cookie: cookie } : {} });
   if (r.status !== 200) throw new Error('/api/snapshot 返回 ' + r.status);
   const j = await r.json();
   return (j && j.data) ? j.data : j;      /* 该端点裸返回，两种都兼容 */
+}
+
+/* 【方案 A（2026-10-29）：兜底去重】推送前先问沙箱"今天哪些计划已经推过了"
+ * （GET /api/notify/pushed，口令闸内只读），把沙箱已推过的计划滤掉 ——
+ * 消除"同一条计划群里看到两种格式两条消息"（沙箱事件推送 + 本定时任务各发各的）。
+ * "今天"按北京时间 0 点裁剪（条目带原始 ts，沙箱不猜时区）。
+ * 查询失败（端点不在/网络抖动）按"沙箱没推过"处理 —— 可用性优先于去重，宁可多推不漏推。 */
+async function pushedNames(cookie) {
+  try {
+    const r = await fetch(withShare(BASE + '/api/notify/pushed'), { headers: cookie ? { Cookie: cookie } : {} });
+    if (r.status !== 200) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const items = (j && j.items) || [];
+    const bjDay = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
+    const dayStart = Date.parse(bjDay + 'T00:00:00Z') - 8 * 3600e3;   // 北京当天 0 点（UTC ms）
+    const set = new Set();
+    items.forEach(x => { if (Number(x.ts) >= dayStart && x.name) set.add(String(x.name)); });
+    log('沙箱已推清单：今天 ' + set.size + ' 个');
+    return set;
+  } catch (e) {
+    log('已推清单查询失败（' + (e && e.message) + '），按"沙箱没推过"处理');
+    return null;
+  }
 }
 
 /* 判据与主系统一致：AP 唯一出口 apOf，payUsers=0 不推 */
@@ -158,9 +190,18 @@ function writeState(s) {
   const snap = await snapshot(cookie);
   log('快照：' + (snap.campaigns || []).length + ' 个计划');
 
-  const targets = pickTargets(snap);
+  let targets = pickTargets(snap);
   log('命中判据：' + targets.length + ' 个');
   if (!targets.length) { log('没有 AP>' + AP_MIN + ' 的重点计划，不推送'); return; }
+
+  /* 【方案 A】滤掉沙箱今天已推过的计划；全被滤掉 = 沙箱通道正常工作，兜底不打扰。 */
+  const pushed = await pushedNames(cookie);
+  if (pushed) {
+    const before = targets.length;
+    targets = targets.filter(x => !pushed.has(String(x.c.name || '')));
+    log('沙箱今天已推 ' + (before - targets.length) + ' 个，兜底剩 ' + targets.length + ' 个');
+    if (!targets.length) { log('重点计划沙箱通道已全部推过，兜底通道不打扰'); return; }
+  }
 
   const key = targets.map(x => x.c.name + ':' + x.ap.toFixed(0)).join('|');
   const day = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
