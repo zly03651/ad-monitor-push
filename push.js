@@ -187,8 +187,21 @@ function writeState(s) {
 
   const cookie = await login();
   log('已过口令闸');
-  const snap = await snapshot(cookie);
-  log('快照：' + (snap.campaigns || []).length + ' 个计划');
+  /* 【先唤醒、等一轮同步、再读数（2026-11-02）】沙箱是"访问唤醒"型：这次请求把实例
+   * 唤醒后，第一次读到的往往是**上次落盘的旧快照**（同步轮次还没跑完）—— 周末延迟
+   * 2.5 小时就是这么来的。所以这里读两次：第一次唤醒 + 顺手触发同步，等 SYNC_WAIT_MS
+   * （默认 20 秒，沙箱同步间隔 5 秒，够跑完一轮），再读第二次，取同步时间更新的那份。
+   * 两次读的间隙实例保持存活（本次连接还没断），同步在后台继续跑。 */
+  const s1 = await snapshot(cookie);
+  log('第一次快照：' + (s1.campaigns || []).length + ' 个计划 · 同步时间 '
+    + (((s1.sync || {}).lastSyncTs) ? new Date(s1.sync.lastSyncTs).toISOString() : '未知'));
+  await new Promise(r => setTimeout(r, Number(process.env.SYNC_WAIT_MS || 20000)));
+  const s2 = await snapshot(cookie);
+  const ts1 = Number((s1.sync || {}).lastSyncTs) || 0;
+  const ts2 = Number((s2.sync || {}).lastSyncTs) || 0;
+  const snap = ts2 >= ts1 ? s2 : s1;
+  log((ts2 >= ts1 ? '第二次' : '第一次（第二次反而旧，罕见）') + '快照：' + (snap.campaigns || []).length
+    + ' 个计划 · 同步时间 ' + (Math.max(ts1, ts2) ? new Date(Math.max(ts1, ts2)).toISOString() : '未知'));
 
   let targets = pickTargets(snap);
   log('命中判据：' + targets.length + ' 个');
@@ -203,10 +216,19 @@ function writeState(s) {
     if (!targets.length) { log('重点计划沙箱通道已全部推过，兜底通道不打扰'); return; }
   }
 
+  /* 【跨天不再重播（2026-11-02 用户报：每天 0 点把昨天的数据重新播一遍）】
+   * 老判据 st.day === day && st.key === key：跨天 state.day 变了 ⇒ 同样内容被当成
+   * "今天首次"全量重发 —— 而 0 点刚过时沙箱读到的还是昨天的数据（访问唤醒 + 平台
+   * 日切时间差），于是每天 0 点把昨天的数播一遍。现在指纹**跨天比较**：内容（计划名+AP）
+   * 和上次推送完全一样就不发，管它是今天还是昨天推的；AP 真变了才推。 */
   const key = targets.map(x => x.c.name + ':' + x.ap.toFixed(0)).join('|');
   const day = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
   const st = readState();
-  if (st.day === day && st.key === key) { log('内容与上次相同，不重复打扰'); return; }
+  if (st.key === key) {
+    log('内容与上次推送完全相同（上次 ' + (st.day || '?') + '，今天 ' + day + '）—— 不重复打扰，跨天也不重播');
+    writeState({ day, key, ts: Date.now() });
+    return;
+  }
 
   const content = buildMessage(targets);
   const r = await push(content);
