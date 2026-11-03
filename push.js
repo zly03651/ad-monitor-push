@@ -304,37 +304,41 @@ function writeState(s) {
   log('命中判据：' + targets.length + ' 个');
 
   const day = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
+  const yesterday = new Date(Date.parse(day + 'T00:00:00Z') - 86400e3).toISOString().slice(0, 10);
   const st = readState();
 
   /* 【昨日补报（2026-11-03 用户报：昨晚达标的计划企微没 @）】深夜达标的计划
    * 两个通道都会整体漏掉：沙箱睡着（没人开看板就不跑推送），而 Actions 下一轮
    * 跑到时已过 0 点 —— 当天 payUsers 归零、AP 算不出，判据永远不再命中。
-   * 补法：state.pushed[day] 记录本兜底**实际推过**的计划名；换天第一跑时用
-   * 快照 historyDaily 重算"昨天最终口径"的合格名单（recharge/payUsers 是日累计，
-   * 深夜最后一笔也算在内），减去推过的 ⇒ 剩下的补一条（带 @）。
-   * 只对昨天补一天：更早的属于历史遗留，不回溯。 */
-  if (st.day && st.day !== day) {
+   * 补法：state.compensatedFor 记"补到哪天了"；**每天第一跑必对昨天补一次账**
+   * （不能用 st.day!==day 判断 —— 旧版代码跨天也会把 day 滚到今天，那样
+   * 第一天上线时昨天的漏网之鱼就永远补不上，2026-11-03 的 360屏保 就是活例）。
+   * 口径：快照 historyDaily 里**昨天那一行**重算合格名单（recharge/payUsers 是
+   * 日累计，深夜最后一笔也算在内），减去「沙箱台账昨天推过的」和「本兜底昨天
+   * 推过的」⇒ 剩下的补一条（带 @）。一天最多补一次；查询失败宁可多推。 */
+  if (st.compensatedFor !== yesterday) {
     /* 沙箱昨天已推的也要排除（台账全量 pushLog 里 day===昨天的条目），
      * 否则白天沙箱推过、凌晨兜底又补一遍，群里刷屏。 */
     const idToName = {};
     ((snap && snap.campaigns) || []).forEach(c => { if (c && c.id) idToName[c.id] = String(c.name || ''); });
-    const pushedYday = new Set((st.pushed && st.pushed[st.day]) || []);
-    const sb = await sandboxPushedNames(cookie, st.day, idToName);
+    const pushedYday = new Set((st.pushed && st.pushed[yesterday]) || []);
+    const sb = await sandboxPushedNames(cookie, yesterday, idToName);
     if (sb) sb.forEach(n => pushedYday.add(n));
-    const yd = pickTargetsFromHistory(snap, st.day);
+    const yd = pickTargetsFromHistory(snap, yesterday);
     const missed = yd.filter(x => !pushedYday.has(String(x.c.name || '')));
     if (missed.length) {
-      log('昨日补报：' + st.day + ' 合格 ' + yd.length + ' 个，其中本兜底没推过 ' + missed.length + ' 个');
+      log('昨日补报：' + yesterday + ' 合格 ' + yd.length + ' 个，其中没推过 ' + missed.length + ' 个');
       const content = buildMessage(missed,
-        '投放监控 · 昨日补报 ' + missed.length + ' 个（' + st.day + ' 数据，AP>' + AP_MIN + '）');
+        '投放监控 · 昨日补报 ' + missed.length + ' 个（' + yesterday + ' 数据，AP>' + AP_MIN + '）');
       const r = await push(content);
       if (!r.ok) { console.error('补报推送失败：' + JSON.stringify(r.detail)); process.exit(1); }
       const mr = await pushMention(missed.map(x => x.c.ownerName), await mentionItems(cookie));
       log('补报已推（' + missed.length + ' 个，@=' + (mr.ok ? '已发' : JSON.stringify(mr).slice(0, 120)) + '）');
       st.pushed = st.pushed || {};
-      st.pushed[st.day] = (st.pushed[st.day] || []).concat(missed.map(x => x.c.name));
-      writeState(st);   /* 立刻落盘：后面就算提前 return，补报也不能重复发 */
+      st.pushed[yesterday] = (st.pushed[yesterday] || []).concat(missed.map(x => x.c.name));
     }
+    st.compensatedFor = yesterday;
+    writeState(st);   /* 标记/记录立刻落盘：后面就算提前 return，补报也不能重复发 */
   }
 
   if (!targets.length) { log('没有 AP>' + AP_MIN + ' 的重点计划，不推送'); return; }
