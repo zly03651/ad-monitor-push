@@ -124,6 +124,29 @@ async function pushedNames(cookie) {
   }
 }
 
+/* 【沙箱某天推过哪些（2026-11-03）】补报前先查沙箱台账（GET /api/notify/ledger，
+ * 全量 pushLog，按 campaignId 记、带 day），把 ids 映射回计划名 ——
+ * 避免"沙箱白天推过、兜底凌晨又补一遍"的重复打扰。
+ * 台账查询失败按"没推过"处理：宁可多推，不漏推。 */
+async function sandboxPushedNames(cookie, dayWanted, idToName) {
+  try {
+    const r = await fetch(withShare(BASE + '/api/notify/ledger'), { headers: cookie ? { Cookie: cookie } : {} });
+    if (r.status !== 200) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const pl = (j && j.pushLog) || {};
+    const set = new Set();
+    Object.keys(pl).forEach(id => {
+      const rec = pl[id];
+      if (rec && rec.day === dayWanted && idToName[id]) set.add(String(idToName[id]));
+    });
+    log('沙箱 ' + dayWanted + ' 已推 ' + set.size + ' 个');
+    return set;
+  } catch (e) {
+    log('沙箱台账查询失败（' + (e && e.message) + '），按"没推过"处理');
+    return null;
+  }
+}
+
 /* 判据与主系统一致：AP 唯一出口 apOf，payUsers=0 不推 */
 const apOf = c => (c && Number(c.payUsers) > 0) ? Number(c.recharge || 0) / Number(c.payUsers) : 0;
 
@@ -137,14 +160,36 @@ function pickTargets(snap) {
     .sort((a, b) => b.ap - a.ap);
 }
 
-function buildMessage(targets) {
+/* 【昨日补报的口径（2026-11-03）】用 historyDaily 里**昨天那一行**重算合格名单。
+ * 为什么不用当天的 pickTargets：跨天后当天 payUsers 归零，深夜达标永远查不到。
+ * recharge/payUsers 是日累计，昨天最后一行的值就是昨天的最终口径 ——
+ * 只要昨天任意时刻达到过 AP>60 且最终仍 >60，这里都能兜住。
+ * 历史行挂在计划对象上（老版本挂在顶层 historyDaily），两处都兼容。 */
+function pickTargetsFromHistory(snap, yday) {
+  const top = (snap && snap.historyDaily) || {};
+  return ((snap && snap.campaigns) || [])
+    .map(c => {
+      let rows = c.historyDaily || top[c.id] || [];
+      if (!Array.isArray(rows)) rows = Object.values(rows);
+      const r = rows.find(x => x && x.date === yday);
+      if (!r) return null;
+      const ap = (Number(r.payUsers) > 0) ? Number(r.recharge || 0) / Number(r.payUsers) : 0;
+      if (!(ap > AP_MIN)) return null;
+      if (!c.ownerName) return null;            /* 与 pickTargets 同款：有负责人才推 */
+      return { c: { name: c.name, ownerName: c.ownerName, spend: r.spend || 0 }, ap };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.ap - a.ap);
+}
+
+function buildMessage(targets, title) {
   const byOwner = {};
   targets.forEach(x => {
     const o = x.c.ownerName;
     (byOwner[o] = byOwner[o] || []).push(x);
   });
   const lines = [];
-  lines.push('## 投放监控 · 重点计划 ' + targets.length + ' 个（AP>' + AP_MIN + '）');
+  lines.push('## ' + (title || ('投放监控 · 重点计划 ' + targets.length + ' 个（AP>' + AP_MIN + '）')));
   lines.push('');
   Object.keys(byOwner).forEach(owner => {
     lines.push('**' + owner + '**（' + byOwner[owner].length + ' 个）');
@@ -157,6 +202,58 @@ function buildMessage(targets) {
   });
   lines.push('<font color="comment">' + new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 16).replace('T', ' ') + '（北京时间）</font>');
   return lines.join('\n');
+}
+
+/* 【真 @（2026-11-03）】兜底消息也要 @ 到人 —— 之前负责人只是加粗文字，群里
+ * 没有提醒。沙箱有未脱敏名单端点（GET /api/notify/mentions，口令闸内）。
+ * 查询失败不挡主流程：digest 照发，只是这条不带 @。 */
+async function mentionItems(cookie) {
+  try {
+    const r = await fetch(withShare(BASE + '/api/notify/mentions'), { headers: cookie ? { Cookie: cookie } : {} });
+    if (r.status !== 200) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    return (j && j.items) || [];
+  } catch (e) {
+    log('@ 名单查询失败（' + (e && e.message) + '），本条不带 @');
+    return null;
+  }
+}
+
+/* @ 的载体是**单独一条 text 消息**：markdown 的 <@userid> 只认成员账号，
+ * 而名单里配的多是手机号 —— text 的 mentioned_mobile_list 认手机号、
+ * mentioned_list 认 userid，按服务端给的 mobile 标记分流，两种都稳。 */
+async function pushMention(owners, items) {
+  if (!Array.isArray(items) || !items.length) return { skipped: 'no-items' };
+  const byName = {};
+  items.forEach(x => { byName[String(x.name || '').trim()] = x; });
+  const mobiles = [], users = [], names = [];
+  const seen = new Set();
+  (owners || []).forEach(o => {
+    const key = String(o || '').trim();
+    const m = byName[key];
+    if (!m || !m.id || seen.has(key)) return;
+    seen.add(key);
+    (m.mobile ? mobiles : users).push(m.id);
+    names.push('@' + key);
+  });
+  if (!names.length) return { skipped: 'no-config' };
+  const content = names.join(' ') + ' 以上重点计划请关注（AP>' + AP_MIN + '）';
+  if (DRY) {
+    console.log('--- DRY RUN，@ 消息 ---\n' + content
+      + '\n(mentioned_mobile_list=' + mobiles.join(',') + ' | mentioned_list=' + users.join(',') + ')');
+    return { ok: true, dry: true };
+  }
+  const text = { content };
+  if (mobiles.length) text.mentioned_mobile_list = mobiles;
+  if (users.length) text.mentioned_list = users;
+  const r = await fetch(HOOK, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ msgtype: 'text', text }),
+  });
+  const j = await r.json().catch(() => ({}));
+  const ok = j && (j.errcode === 0 || j.errcode === undefined);
+  return { ok, detail: j };
 }
 
 async function push(content) {
@@ -205,6 +302,41 @@ function writeState(s) {
 
   let targets = pickTargets(snap);
   log('命中判据：' + targets.length + ' 个');
+
+  const day = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
+  const st = readState();
+
+  /* 【昨日补报（2026-11-03 用户报：昨晚达标的计划企微没 @）】深夜达标的计划
+   * 两个通道都会整体漏掉：沙箱睡着（没人开看板就不跑推送），而 Actions 下一轮
+   * 跑到时已过 0 点 —— 当天 payUsers 归零、AP 算不出，判据永远不再命中。
+   * 补法：state.pushed[day] 记录本兜底**实际推过**的计划名；换天第一跑时用
+   * 快照 historyDaily 重算"昨天最终口径"的合格名单（recharge/payUsers 是日累计，
+   * 深夜最后一笔也算在内），减去推过的 ⇒ 剩下的补一条（带 @）。
+   * 只对昨天补一天：更早的属于历史遗留，不回溯。 */
+  if (st.day && st.day !== day) {
+    /* 沙箱昨天已推的也要排除（台账全量 pushLog 里 day===昨天的条目），
+     * 否则白天沙箱推过、凌晨兜底又补一遍，群里刷屏。 */
+    const idToName = {};
+    ((snap && snap.campaigns) || []).forEach(c => { if (c && c.id) idToName[c.id] = String(c.name || ''); });
+    const pushedYday = new Set((st.pushed && st.pushed[st.day]) || []);
+    const sb = await sandboxPushedNames(cookie, st.day, idToName);
+    if (sb) sb.forEach(n => pushedYday.add(n));
+    const yd = pickTargetsFromHistory(snap, st.day);
+    const missed = yd.filter(x => !pushedYday.has(String(x.c.name || '')));
+    if (missed.length) {
+      log('昨日补报：' + st.day + ' 合格 ' + yd.length + ' 个，其中本兜底没推过 ' + missed.length + ' 个');
+      const content = buildMessage(missed,
+        '投放监控 · 昨日补报 ' + missed.length + ' 个（' + st.day + ' 数据，AP>' + AP_MIN + '）');
+      const r = await push(content);
+      if (!r.ok) { console.error('补报推送失败：' + JSON.stringify(r.detail)); process.exit(1); }
+      const mr = await pushMention(missed.map(x => x.c.ownerName), await mentionItems(cookie));
+      log('补报已推（' + missed.length + ' 个，@=' + (mr.ok ? '已发' : JSON.stringify(mr).slice(0, 120)) + '）');
+      st.pushed = st.pushed || {};
+      st.pushed[st.day] = (st.pushed[st.day] || []).concat(missed.map(x => x.c.name));
+      writeState(st);   /* 立刻落盘：后面就算提前 return，补报也不能重复发 */
+    }
+  }
+
   if (!targets.length) { log('没有 AP>' + AP_MIN + ' 的重点计划，不推送'); return; }
 
   /* 【方案 A】滤掉沙箱今天已推过的计划；全被滤掉 = 沙箱通道正常工作，兜底不打扰。 */
@@ -222,17 +354,21 @@ function writeState(s) {
    * 日切时间差），于是每天 0 点把昨天的数播一遍。现在指纹**跨天比较**：内容（计划名+AP）
    * 和上次推送完全一样就不发，管它是今天还是昨天推的；AP 真变了才推。 */
   const key = targets.map(x => x.c.name + ':' + x.ap.toFixed(0)).join('|');
-  const day = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
-  const st = readState();
   if (st.key === key) {
     log('内容与上次推送完全相同（上次 ' + (st.day || '?') + '，今天 ' + day + '）—— 不重复打扰，跨天也不重播');
-    writeState({ day, key, ts: Date.now() });
+    writeState(Object.assign({}, st, { day, key, ts: Date.now() }));
     return;
   }
 
   const content = buildMessage(targets);
   const r = await push(content);
   if (!r.ok) { console.error('推送失败：' + JSON.stringify(r.detail)); process.exit(1); }
-  log('已推送（' + targets.length + ' 个计划）');
-  writeState({ day, key, ts: Date.now() });
+  /* 【真 @】digest 发出后补一条 text @；名单查不到就只发 digest，不挡主流程。 */
+  const mr = await pushMention(targets.map(x => x.c.ownerName), await mentionItems(cookie));
+  log('已推送（' + targets.length + ' 个计划，@=' + (mr.ok ? '已发' : '未发') + '）');
+  /* 记录今天实际推过的计划名（供跨天补报比对），只留最近 3 天，state 不无限膨胀 */
+  const pushedKeep = {};
+  Object.keys(st.pushed || {}).sort().slice(-2).forEach(d => { pushedKeep[d] = st.pushed[d]; });
+  pushedKeep[day] = ((st.pushed || {})[day] || []).concat(targets.map(x => x.c.name));
+  writeState(Object.assign({}, st, { day, key, ts: Date.now(), pushed: pushedKeep }));
 })().catch(e => { console.error('失败：' + (e && e.message)); process.exit(1); });
