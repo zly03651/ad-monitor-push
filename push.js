@@ -33,6 +33,10 @@ const STATE_FILE = path.join(STATE_DIR, 'last.json');
 const PW = (process.env.APP_PASSWORD || '').trim();
 const HOOK = (process.env.WECOM_WEBHOOK || '').trim();
 
+/* 【公开仓库日志纪律（2026-11-03）】仓库公开后 Actions 运行日志任何人可见，
+ * 所以本脚本所有 console 输出**只允许计数与状态**，禁止出现：
+ * 计划名 / AP / 花费 / 负责人名 / 手机号 / userid / 完整消息内容 / 带 sharecode 的 URL。
+ * DRY RUN 也一样 —— 要看明细就去企微群里看真消息，别靠日志。 */
 function log(msg) { console.log('[' + new Date().toISOString() + '] ' + msg); }
 
 /* ---- 推送时段：默认周一~周日 全天 ----
@@ -239,8 +243,9 @@ async function pushMention(owners, items) {
   if (!names.length) return { skipped: 'no-config' };
   const content = names.join(' ') + ' 以上重点计划请关注（AP>' + AP_MIN + '）';
   if (DRY) {
-    console.log('--- DRY RUN，@ 消息 ---\n' + content
-      + '\n(mentioned_mobile_list=' + mobiles.join(',') + ' | mentioned_list=' + users.join(',') + ')');
+    /* 脱敏：不打印 content（含计划名/AP/负责人），只打印计数与载体分布 */
+    console.log('--- DRY RUN，@ 消息：拟 @ ' + names.length + ' 人'
+      + '（mobiles=' + mobiles.length + '，users=' + users.length + '），明细已脱敏 ---');
     return { ok: true, dry: true };
   }
   const text = { content };
@@ -257,7 +262,8 @@ async function pushMention(owners, items) {
 }
 
 async function push(content) {
-  if (DRY) { console.log('--- DRY RUN，消息内容 ---\n' + content); return { ok: true, dry: true }; }
+  /* 脱敏：DRY 只报长度，不落消息内容（公开仓库日志可见） */
+  if (DRY) { console.log('--- DRY RUN，消息 ' + content.length + ' 字符（明细已脱敏）---'); return { ok: true, dry: true }; }
   const r = await fetch(HOOK, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
