@@ -7,9 +7,9 @@
  *   规则（用户 11-09 拍板）：>5000 当天未登录 / >1000 满1天 / >200 满2天 触发
  *   第一次；离线满 7 天第二次；自然月最多 2 次；回归重置；kf 数据停更 >6h 熔断。
  *
- * 【触发】仓库已有 5 分钟 cron + 本机 dispatch 外部触发，这里自己判断北京时间：
- *   10:30 与 17:30 各一个 5 分钟窗口（[10:30,10:35) / [17:30,17:35)），
- *   窗口内第一跑发送；state 记当天已发时段，窗口内第二跑直接跳过。
+ * 【触发】仓库 cron + 本机 dispatch 外部触发，这里自己判断北京时间：
+ *   10:30 与 17:30 两个宽窗口（[10:30,13:00) / [17:30,21:00)，抵消 GitHub cron 限流延迟），
+ *   窗口内第一跑发送；state 记当天已发时段，之后的重跑直接跳过（一天一次）。
  *
  * 【防重】两层：
  *   ① 本地 state（.state/paytrack.json）记"今天哪个时段发过"；
@@ -39,10 +39,14 @@ const DRY = process.env.DRY_RUN === '1';
 const STATE_DIR = path.join(process.cwd(), '.state');
 const STATE_FILE = path.join(STATE_DIR, 'paytrack.json');
 
-/* 发送时段（北京时间）：label → [起,止) 分钟 */
+/* 发送时段（北京时间）：label → [起,止) 分钟。
+ * ⚠️ 2026-11-09 实测：GitHub 免费版 schedule 被限流，每 5 分钟的 cron 实际 30~50 分钟才跑一次
+ *   （当天 10:31 → 11:18 → 12:18 → 13:24 → 14:28 → 15:52 → 16:52 → 17:44 → 18:31 → 19:25）。
+ *   原来 5 分钟窗口直接把 17:30 那轮错过了 ⇒ 窗口放宽到 2.5 小时，
+ *   靠 state 的「当天该时段已发」标记保证一天只发一次（晚发总比不发好）。 */
 const SLOTS = [
-  { label: '1030', start: 10 * 60 + 30, end: 10 * 60 + 35 },
-  { label: '1730', start: 17 * 60 + 30, end: 17 * 60 + 35 },
+  { label: '1030', start: 10 * 60 + 30, end: 13 * 60 },
+  { label: '1730', start: 17 * 60 + 30, end: 21 * 60 },
 ];
 
 function log(msg) { console.log('[' + new Date().toISOString() + '] ' + msg); }
@@ -110,7 +114,7 @@ async function sendMarkdown(content) {
   if (!HOOK && !DRY) { console.error('缺少 WECOM_WEBHOOK_PAY'); process.exit(2); }
 
   const slot = (process.env.FORCE_SLOT && SLOTS.find(s => s.label === process.env.FORCE_SLOT)) || currentSlot();
-  if (!slot) { log('不在播报时段（10:30 / 17:30 北京时间），跳过'); return; }
+  if (!slot) { log('不在播报时段（10:30-13:00 / 17:30-21:00 北京时间），跳过'); return; }
   if (process.env.FORCE_SLOT) log('FORCE_SLOT=' + slot.label + '（测试旁路，忽略时段窗口）');
 
   const day = bjDay();
