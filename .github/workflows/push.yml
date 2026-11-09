@@ -38,3 +38,10 @@ jobs:
           PUSH_START: ${{ vars.PUSH_START }}
           PUSH_END: ${{ vars.PUSH_END }}
         run: node push.js
+
+      - name: 付费用户流失播报（独立群，10:30 / 17:30）
+        env:
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+          KF_SYNC_KEY: ${{ secrets.KF_SYNC_KEY }}
+          WECOM_WEBHOOK_PAY: ${{ secrets.WECOM_WEBHOOK_PAY }}
+        run: node paytrack-broadcast.js
