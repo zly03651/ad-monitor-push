@@ -4,6 +4,9 @@
  *
  * 【分工】判定与台账全在主系统（lib/paytrack.js#broadcastFeed/Ack，唯一出口），
  *   本脚本只是哑终端：到点 → 拉 feed → 逐条发企微 → 发一条 ack 一条。
+ * 【2026-11-10 用户口径】播报内容 = 一条「太始 · 付费跟踪数据速览」（区间对比/状态/
+ *   充值 Top10/需跟进），带红点的流失明细消息不再下发；速览发成功后仍 ack 候选人，
+ *   保证「同一节点不重复提示」的台账语义。
  *   规则（用户 11-09 拍板）：>5000 当天未登录 / >1000 满1天 / >200 满2天 触发
  *   第一次；离线满 7 天第二次；自然月最多 2 次；回归重置；kf 数据停更 >6h 熔断。
  *
@@ -133,8 +136,8 @@ async function sendMarkdown(content) {
 
   /* 与服务端台账对账：feed.sendsPerMessage 与 messages 一一对应，
    * 发一条 ack 一组 —— 部分失败下轮 feed 只剩没发出去的人。
-   * 【2026-11-10 用户拍板】messages[0] 恒为「数据速览」（不进台账、空组不 ack），
-   *   无流失触发也要发速览；有触发再跟明细。 */
+   * 【2026-11-10 最终口径】messages 只有一条「数据速览」；它对应的组是本次候选人，
+   *   发成功就 ack（台账记"已播报过"，同一节点不再提示）。 */
   log('候选 ' + ((f.sends || []).length) + ' 人 · 消息 ' + ((f.messages || []).length) + ' 条 · 名单 ' + (f.population || 0) + ' · 无登录数据 ' + (f.nodata || 0));
   const msgs = f.messages || [];
   const groups = f.sendsPerMessage || [];
@@ -150,7 +153,7 @@ async function sendMarkdown(content) {
       process.exit(1);   /* 不记已发；已成功的组已 ack，下轮重试只补这条 */
     }
     if (groups[i] && groups[i].length) await ack(cookie, groups[i]);
-    log('第 ' + (i + 1) + '/' + msgs.length + ' 条已发' + ((groups[i] || []).length ? '并登记' : '（速览，不登记）'));
+    log('第 ' + (i + 1) + '/' + msgs.length + ' 条已发' + ((groups[i] || []).length ? '并登记 ' + groups[i].length + ' 人' : '（无候选人，不登记）'));
   }
 
   writeState(Object.assign({}, st, { day, sent: Object.assign({}, st.sent, { [slot.label]: Date.now() }) }));
