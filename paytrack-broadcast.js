@@ -132,15 +132,16 @@ async function sendMarkdown(content) {
   }
 
   /* 与服务端台账对账：feed.sendsPerMessage 与 messages 一一对应，
-   * 发一条 ack 一组 —— 部分失败下轮 feed 只剩没发出去的人 */
+   * 发一条 ack 一组 —— 部分失败下轮 feed 只剩没发出去的人。
+   * 【2026-11-10 用户拍板】messages[0] 恒为「数据速览」（不进台账、空组不 ack），
+   *   无流失触发也要发速览；有触发再跟明细。 */
   log('候选 ' + ((f.sends || []).length) + ' 人 · 消息 ' + ((f.messages || []).length) + ' 条 · 名单 ' + (f.population || 0) + ' · 无登录数据 ' + (f.nodata || 0));
-  if (!(f.sends || []).length) {
-    writeState(Object.assign({}, st, { day, sent: Object.assign({}, st.sent, { [slot.label]: Date.now() }) }));
-    log('本时段无触发，记已处理'); return;
-  }
-
   const msgs = f.messages || [];
   const groups = f.sendsPerMessage || [];
+  if (!msgs.length) {
+    writeState(Object.assign({}, st, { day, sent: Object.assign({}, st.sent, { [slot.label]: Date.now() }) }));
+    log('本时段无消息，记已处理'); return;
+  }
   if (DRY) { log('DRY RUN 结束（不发群、不 ack、不写状态）'); return; }
   for (let i = 0; i < msgs.length; i++) {
     const r = await sendMarkdown(msgs[i]);
@@ -148,8 +149,8 @@ async function sendMarkdown(content) {
       console.error('第 ' + (i + 1) + ' 条发送失败：' + JSON.stringify(r.detail || {}).slice(0, 200));
       process.exit(1);   /* 不记已发；已成功的组已 ack，下轮重试只补这条 */
     }
-    await ack(cookie, groups[i] || []);
-    log('第 ' + (i + 1) + '/' + msgs.length + ' 条已发并登记');
+    if (groups[i] && groups[i].length) await ack(cookie, groups[i]);
+    log('第 ' + (i + 1) + '/' + msgs.length + ' 条已发' + ((groups[i] || []).length ? '并登记' : '（速览，不登记）'));
   }
 
   writeState(Object.assign({}, st, { day, sent: Object.assign({}, st.sent, { [slot.label]: Date.now() }) }));
