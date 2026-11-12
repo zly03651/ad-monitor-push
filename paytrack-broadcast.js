@@ -83,11 +83,22 @@ async function login() {
 }
 
 async function feed(cookie) {
-  const r = await fetch(withShare(BASE + '/api/paytrack/broadcast-feed'), {
-    headers: Object.assign({ 'x-sync-key': KEY }, cookie ? { Cookie: cookie } : {}),
-  });
-  if (r.status !== 200) throw new Error('broadcast-feed 返回 ' + r.status);
-  return r.json();
+  /* 【2026-11-10】冷启动/缓存过期时 feed 要现算 5251 快照，部署网关 60-120s 会 504。
+   * 服务端会在客户端断开后继续算（缓存仍会热起来）⇒ 隔 30 秒重试，最多 3 次。 */
+  let last = null;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const r = await fetch(withShare(BASE + '/api/paytrack/broadcast-feed'), {
+        headers: Object.assign({ 'x-sync-key': KEY }, cookie ? { Cookie: cookie } : {}),
+        signal: AbortSignal.timeout(120000),
+      });
+      if (r.status === 200) return r.json();
+      last = new Error('broadcast-feed 返回 ' + r.status);
+    } catch (e) { last = e; }
+    log('feed 第 ' + (i + 1) + ' 次失败：' + (last && last.message) + (i < 2 ? '，30 秒后重试' : ''));
+    if (i < 2) await new Promise(res => setTimeout(res, 30000));
+  }
+  throw last || new Error('feed 失败');
 }
 
 async function ack(cookie, sends) {
@@ -121,8 +132,13 @@ async function sendMarkdown(content) {
   if (process.env.FORCE_SLOT) log('FORCE_SLOT=' + slot.label + '（测试旁路，忽略时段窗口）');
 
   const day = bjDay();
-  const st = readState();
-  if (st.day === day && st.sent && st.sent[slot.label]) {
+  let st = readState();
+  /* 【2026-11-12 修复】sent 按 1030/1730 记，但跨天必须清零：否则每天第一个时段(1030)把当天标记
+   * merge 进「昨天的 sent」，把昨天残留的 1730 标记带到今天；到 17:30 时 day 已是今天、
+   * 陈旧 1730 标记仍为 truthy ⇒ 误判「今天已发过」⇒ 跳过、整天不播报。 */
+  if (st.day !== day) st = Object.assign({}, st, { day, sent: {} });
+  /* FORCE_SLOT（测试/补发旁路）同时绕过时段窗口与去重，便于手动补发 */
+  if (!process.env.FORCE_SLOT && st.day === day && st.sent && st.sent[slot.label]) {
     log('今天 ' + slot.label + ' 时段已发过，跳过'); return;
   }
 
