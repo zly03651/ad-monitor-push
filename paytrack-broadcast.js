@@ -123,6 +123,13 @@ async function sendMarkdown(content) {
 }
 
 (async () => {
+  /* 【2026-11-13】付费播报已迁出 GitHub Actions（免费版定时被严重限流、卡不到整点），
+   * 改由本机 Windows 计划任务「ad-monitor-paytrack-broadcast」在 10:30/17:30 精确触发。
+   * 这里保留 GitHub 那步但自跳过（GitHub 会自动注入 GITHUB_ACTIONS=true），避免与本机重复发。 */
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    log('检测到 GitHub Actions 环境：付费播报已迁出本机计划任务，此处跳过');
+    return;
+  }
   if (!PW) { console.error('缺少 APP_PASSWORD'); process.exit(2); }
   if (!KEY) { console.error('缺少 KF_SYNC_KEY'); process.exit(2); }
   if (!HOOK && !DRY) { console.error('缺少 WECOM_WEBHOOK_PAY'); process.exit(2); }
